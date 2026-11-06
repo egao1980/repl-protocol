@@ -22,6 +22,8 @@
    (events :initform '() :accessor wire-events)
    (indentation :initform '() :accessor wire-indentation)
    (closed :initform nil :accessor wire-closed)
+   (released :initform nil :accessor wire-released
+             :documentation "True once the socket has been shut down and closed.")
    (close-reason :initform nil :accessor wire-close-reason)
    (reader :initform nil :accessor wire-reader-thread)
    (last-thread :initform t :accessor wire-last-thread
@@ -55,7 +57,10 @@
 (defmacro ignoring-wire-errors (&body body)
   "Run BODY; a broken connection there is not the caller's problem."
   `(handler-case (progn ,@body)
-     ((or repl-error stream-error usocket:socket-error) () nil)))
+     ((or repl-error stream-error usocket:socket-error
+          ;; usocket does not wrap shutdown(2) failures on every platform
+          #+sbcl sb-bsd-sockets:socket-error)
+         () nil)))
 
 (defun wire-close (conn)
   (unless (wire-closed conn)
@@ -65,14 +70,16 @@
       (bt2:condition-broadcast (wire-cv conn))))
   ;; Shut down first so the reader thread's blocking read returns, join it,
   ;; and only then free the descriptor: closing an fd another thread is
-  ;; selecting on can corrupt SBCL's fd handling.
-  (ignoring-wire-errors (usocket:socket-shutdown (wire-socket conn) :io))
-  (let ((reader (wire-reader-thread conn)))
-    (when (and reader (not (eq reader (bt2:current-thread))))
-      (loop repeat 200
-            while (bt2:thread-alive-p reader)
-            do (sleep 0.01))))
-  (ignoring-wire-errors (usocket:socket-close (wire-socket conn)))
+  ;; selecting on can corrupt SBCL's fd handling. Idempotent.
+  (unless (bt2:with-lock-held ((wire-lock conn))
+            (shiftf (wire-released conn) t))
+    (ignoring-wire-errors (usocket:socket-shutdown (wire-socket conn) :io))
+    (let ((reader (wire-reader-thread conn)))
+      (when (and reader (not (eq reader (bt2:current-thread))))
+        (loop repeat 200
+              while (bt2:thread-alive-p reader)
+              do (sleep 0.01))))
+    (ignoring-wire-errors (usocket:socket-close (wire-socket conn))))
   conn)
 
 ;;; Reader thread
