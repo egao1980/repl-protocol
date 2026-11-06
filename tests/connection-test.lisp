@@ -101,3 +101,9 @@
     (wire-close conn)
     (ok (not (repl-connected-p conn)))
     (ok (signals (wire-rex conn (list (wsym "T" "ECHO") 1)) 'repl-connection-error))))
+
+(deftest close-is-idempotent
+  (with-fake-server (conn)
+    (wire-close conn)
+    (ok (wire-close conn))
+    (ok (wire-close conn))))
