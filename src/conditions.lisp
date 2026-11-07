@@ -37,6 +37,14 @@
 (define-condition repl-not-in-debugger (repl-error) ()
   (:report "The image is not in the debugger"))
 
+(define-condition repl-invalid-restart (repl-error)
+  ((index :initarg :index :reader repl-invalid-restart-index)
+   (count :initarg :count :reader repl-invalid-restart-count))
+  (:report (lambda (c s)
+             (format s "No restart ~A: the debugger has ~D restart~:P (0..~D)"
+                     (repl-invalid-restart-index c) (repl-invalid-restart-count c)
+                     (1- (repl-invalid-restart-count c))))))
+
 (define-condition repl-not-supported (repl-error)
   ((operation :initarg :operation :reader repl-not-supported-operation))
   (:report (lambda (c s)

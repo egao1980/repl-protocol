@@ -139,7 +139,10 @@
    #:repl-channel-package
    #:repl-channel-closed-p
    #:eval-result-entry
+   #:compile-result-fasl
+   #:compile-result-loaded-p
    #:repl-not-supported
+   #:repl-invalid-restart
    #:repl-not-supported-operation
    #:find-program
    #:repl-output

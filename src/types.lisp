@@ -106,7 +106,11 @@ decides what to do (invoke a restart, inspect frames, …)."))
 (defclass compile-result ()
   ((success :initarg :success :reader compile-result-success-p)
    (notes :initarg :notes :initform '() :reader compile-result-notes)
-   (duration :initarg :duration :initform nil :reader compile-result-duration)))
+   (duration :initarg :duration :initform nil :reader compile-result-duration)
+   (fasl :initarg :fasl :initform nil :reader compile-result-fasl
+         :documentation "Fasl written by a file compilation, when there is one.")
+   (loaded :initarg :loaded :initform nil :accessor compile-result-loaded-p
+           :documentation "True once the fasl was loaded into the image.")))
 
 (defmethod print-object ((r compile-result) stream)
   (print-unreadable-object (r stream :type t)

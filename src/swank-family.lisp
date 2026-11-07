@@ -60,11 +60,12 @@
 
 (defun parse-compile-result (form)
   ;; (:compilation-result notes successp duration loadp faslfile)
-  (destructuring-bind (&optional head notes successp duration &rest more) form
-    (declare (ignore head more))
+  (destructuring-bind (&optional head notes successp duration loadp fasl &rest more) form
+    (declare (ignore head loadp more))
     (make-instance 'compile-result
                    :success (and successp t)
                    :duration duration
+                   :fasl (and (stringp fasl) fasl)
                    :notes (loop for note in notes
                                 collect (make-instance
                                          'compiler-note
@@ -187,8 +188,15 @@ output captured, keep the values for later inspection, and return
                     #'parse-compile-result :package package))
 
 (defmethod repl-compile-file ((conn swank-family-connection) pathname &key load)
-  (call-with-result conn (rpc conn :compile-file (namestring pathname) (and load t))
-                    #'parse-compile-result))
+  ;; COMPILE-FILE-FOR-EMACS only compiles; the client loads the fasl, as SLIME does.
+  (let ((result (call-with-result conn (rpc conn :compile-file (namestring pathname) (and load t))
+                                  #'parse-compile-result)))
+    (if (and load (typep result 'compile-result) (compile-result-success-p result) (compile-result-fasl result))
+        (let ((loaded (wire-call conn (rpc conn :load-file (compile-result-fasl result)))))
+          (if (typep loaded 'debugger-state)
+              loaded
+              (progn (setf (compile-result-loaded-p result) t) result)))
+        result)))
 
 (defmethod repl-load-system ((conn swank-family-connection) name)
   (repl-eval conn (format nil "(asdf:load-system ~S)" (string name))))
@@ -227,7 +235,11 @@ debugger returns next: a result, or a new DEBUGGER-STATE."
         (make-instance 'eval-result :values '() :aborted nil))))
 
 (defmethod repl-invoke-restart ((conn swank-family-connection) restart &key level)
-  (let ((state (debugger-thread conn)))
+  (let* ((state (debugger-thread conn))
+         (count (length (debugger-state-restarts state))))
+    ;; the server does not answer an out-of-range index
+    (unless (and (integerp restart) (< -1 restart count))
+      (error 'repl-invalid-restart :index restart :count count))
     (resume-debugger conn (rpc conn :invoke-restart (or level (debugger-state-level state)) restart))))
 
 (defmethod repl-step ((conn swank-family-connection) frame &key (mode :into))

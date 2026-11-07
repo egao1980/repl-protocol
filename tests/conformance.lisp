@@ -46,6 +46,7 @@
       (ok (plusp (length (repl-backtrace conn :start 0 :end 5))))
       (ok (listp (repl-frame-locals conn 0)))
       (ok (typep (repl-inspect-condition conn) 'inspector-view))
+      (ok (signals (repl-invoke-restart conn 99) 'repl-invalid-restart))
       (let ((r (repl-invoke-restart conn (restart-index state "ABORT"))))
         (ok (typep r 'eval-result))
         (ok (eval-result-aborted-p r)))
@@ -94,6 +95,20 @@
     (ok (search "IF" (repl-macroexpand conn "(when a b)") :test #'char-equal))
     (ok (plusp (length (repl-find-definitions conn "conformance-f"))))
     (ok (plusp (length (repl-list-threads conn)))))
+
+  (abort-debugger conn)
+  (testing "compile-file loads the result"
+    (let ((file (uiop:with-temporary-file (:pathname p :type "lisp" :keep t)
+                  (with-open-file (out p :direction :output :if-exists :supersede)
+                    (write-string "(defun conformance-from-file () :loaded)" out))
+                  p)))
+      (unwind-protect
+           (let ((r (repl-compile-file conn file :load t)))
+             (ok (typep r 'compile-result))
+             (ok (compile-result-loaded-p r))
+             (ok (equal (eval-result-values (repl-eval conn "(conformance-from-file)")) '(":LOADED"))))
+        (uiop:delete-file-if-exists file)
+        (uiop:delete-file-if-exists (make-pathname :type "fasl" :defaults file)))))
 
   (abort-debugger conn)
   (testing "interrupt a running evaluation"
