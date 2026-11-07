@@ -1,5 +1,5 @@
 (defsystem "repl-protocol"
-  :version "0.2.0"
+  :version "0.2.1"
   :description "CLOS protocol for a live Lisp image session: eval, debugger, inspector, xref, threads"
   :author "egao1980"
   :license "MIT"
@@ -23,7 +23,7 @@
   :components ((:file "conformance")))
 
 (defsystem "repl-protocol/tests"
-  :depends-on ("repl-protocol" "rove" "flexi-streams")
+  :depends-on ("repl-protocol" "rove" "flexi-streams" "process-backend-uiop")
   :pathname "tests"
   :serial t
   :components ((:file "package")

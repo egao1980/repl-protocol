@@ -114,4 +114,26 @@
     (ok (or (find #\/ found) (find #\\ found))))
   ;; paths and unknown names are returned unchanged
   (ok (equal "/bin/x" (repl-protocol::find-program "/bin/x")))
+  (ok (null (nth-value 1 (repl-protocol::find-program "no-such-program-5a1c"))))
   (ok (equal "no-such-program-5a1c" (repl-protocol::find-program "no-such-program-5a1c"))))
+
+#+sbcl
+(deftest default-command-falls-back-to-this-lisp
+  (let ((repl-protocol:*default-image-command* '("no-such-ros-5a1c" "run" "--")))
+    (let ((cmd (repl-protocol::image-command repl-protocol:*default-image-command* '("(+ 1 2)"))))
+      (ok (equal (first cmd) (uiop:native-namestring sb-ext:*runtime-pathname*)))
+      (ok (equal (last cmd 2) '("--eval" "(+ 1 2)")))))
+  ;; an explicit command is used as given
+  (ok (equal (first (repl-protocol::image-command '("my-lisp") '())) "my-lisp")))
+
+#+sbcl
+(deftest fallback-image-really-starts
+  (let ((repl-protocol:*default-image-command* '("no-such-ros-5a1c" "run" "--"))
+        (process-protocol:*process-backend* (or process-protocol:*process-backend*
+                                                (process-backend-uiop:use-uiop-process-backend))))
+    (let ((port (repl-protocol:spawn-image
+                 (lambda (port-file)
+                   (list (format nil "(with-open-file (o ~S :direction :output :if-exists :supersede) (write 4242 :stream o))" port-file)
+                         "(sleep 1)" "(uiop:quit 0)"))
+                 :timeout 60)))
+      (ok (= port 4242)))))
