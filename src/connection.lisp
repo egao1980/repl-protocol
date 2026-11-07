@@ -262,8 +262,11 @@ and its reply is collected by WIRE-AWAIT after a restart."
                        (return (values (first cell) (second cell))))
                       ((/= serial (wire-debug-serial conn))
                        (let ((state (first (wire-debuggers conn))))
-                         (setf (debugger-state-request-id state) id)
-                         (return (values :debug state))))
+                         (if state
+                             (progn (setf (debugger-state-request-id state) id)
+                                    (return (values :debug state)))
+                             ;; the level opened and closed before we woke: keep waiting
+                             (setf serial (wire-debug-serial conn)))))
                       ((wire-closed conn)
                        (return (values :closed (wire-close-reason conn))))
                       ((and deadline (>= (get-internal-real-time) deadline))

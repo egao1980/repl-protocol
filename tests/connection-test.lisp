@@ -34,6 +34,11 @@
                         (send (list :ping 1 7))
                         (let ((pong (read-message stream)))
                           (send (list :return (list :ok (repl-protocol::symbol-name-of (first pong))) id))))
+                       ((string= op "BLIP")
+                        ;; a debugger level that opens and closes before the reply
+                        (send (list :debug 2 1 (list "blip" "SIMPLE-ERROR") (list (list "ABORT" "x")) nil nil))
+                        (send (list :debug-return 2 1 nil))
+                        (send (list :return (list :ok "after") id)))
                        ((string= op "SLOW") nil)
                        (t (send (list :return (list :abort "unknown") id)))))))
             ((string= head "EMACS-INTERRUPT") nil)))))))
@@ -137,3 +142,10 @@
                          "(sleep 1)" "(uiop:quit 0)"))
                  :timeout 60)))
       (ok (= port 4242)))))
+
+(deftest debugger-level-gone-before-wakeup
+  (with-fake-server (conn)
+    (dotimes (i 20)
+      (multiple-value-bind (status value) (wire-rex conn (list (wsym "SWANK" "BLIP")) :timeout 5)
+        (ok (member status '(:ok :debug)))
+        (when (eq status :ok) (ok (equal value "after")))))))
