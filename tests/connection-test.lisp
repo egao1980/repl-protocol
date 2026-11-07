@@ -6,7 +6,8 @@
   (let ((pending-debug nil))
     (loop
       (let* ((msg (handler-case (read-message stream)
-                    (repl-error () (return))))
+                    ;; the client closed (possibly with a reset)
+                    ((or repl-error stream-error) () (return))))
              (head (symbol-name (first msg))))
         (flet ((send (form) (write-message stream form)))
           (cond
@@ -50,8 +51,11 @@
             (,thread (bt2:make-thread
                       (lambda ()
                         (let ((client (usocket:socket-accept ,listener)))
-                          (unwind-protect (fake-server-loop (usocket:socket-stream client))
-                            (usocket:socket-close client))))
+                          (unwind-protect
+                               (handler-case (fake-server-loop (usocket:socket-stream client))
+                                 (stream-error () nil))
+                            (handler-case (usocket:socket-close client)
+                              (stream-error () nil)))))
                       :name "fake swank"))
             (,conn (open-wire-connection 'wire-connection "127.0.0.1"
                                          (usocket:get-local-port ,listener)

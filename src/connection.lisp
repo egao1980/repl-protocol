@@ -39,11 +39,17 @@
 
 (defun open-wire-connection (class host port &rest initargs)
   "Connect to HOST:PORT and start the reader thread. → instance of CLASS."
-  (let ((socket (handler-case
-                    (usocket:socket-connect host port :element-type '(unsigned-byte 8))
-                  (usocket:socket-error (e)
-                    (error 'repl-connection-error :message (format nil "cannot connect to ~A:~D" host port)
-                                                  :cause e)))))
+  (let ((socket (loop for attempt from 1
+                      do (handler-case
+                             (return (usocket:socket-connect host port :element-type '(unsigned-byte 8)))
+                           ;; a signal (GC stop, SIGCHLD) can interrupt connect(2); usocket does not retry
+                           #+sbcl (sb-bsd-sockets:interrupted-error (e)
+                                    (when (>= attempt 5)
+                                      (error 'repl-connection-error
+                                             :message (format nil "cannot connect to ~A:~D" host port) :cause e)))
+                           (usocket:socket-error (e)
+                             (error 'repl-connection-error :message (format nil "cannot connect to ~A:~D" host port)
+                                                           :cause e))))))
     (let ((conn (apply #'make-instance class :socket socket :host host
                                              :stream (usocket:socket-stream socket) initargs)))
       (setf (wire-reader-thread conn)
