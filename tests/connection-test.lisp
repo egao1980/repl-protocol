@@ -130,9 +130,7 @@
 (deftest fallback-image-really-starts
   (let ((repl-protocol:*default-image-command* '("no-such-ros-5a1c" "run" "--"))
         (process-protocol:*process-backend* (or process-protocol:*process-backend*
-                                                (progn (asdf:load-system "process-backend-uiop")
-                                                       (uiop:symbol-call :process-backend-uiop :use-uiop-process-backend)
-                                                       process-protocol:*process-backend*))))
+                                                (process-backend-uiop:use-uiop-process-backend))))
     (let ((port (repl-protocol:spawn-image
                  (lambda (port-file)
                    (list (format nil "(with-open-file (o ~S :direction :output :if-exists :supersede) (write 4242 :stream o))" port-file)

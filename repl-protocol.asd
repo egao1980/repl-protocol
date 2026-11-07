@@ -23,7 +23,7 @@
   :components ((:file "conformance")))
 
 (defsystem "repl-protocol/tests"
-  :depends-on ("repl-protocol" "rove" "flexi-streams")
+  :depends-on ("repl-protocol" "rove" "flexi-streams" "process-backend-uiop")
   :pathname "tests"
   :serial t
   :components ((:file "package")
