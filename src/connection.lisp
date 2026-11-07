@@ -39,11 +39,17 @@
 
 (defun open-wire-connection (class host port &rest initargs)
   "Connect to HOST:PORT and start the reader thread. → instance of CLASS."
-  (let ((socket (handler-case
-                    (usocket:socket-connect host port :element-type '(unsigned-byte 8))
-                  (usocket:socket-error (e)
-                    (error 'repl-connection-error :message (format nil "cannot connect to ~A:~D" host port)
-                                                  :cause e)))))
+  (let ((socket (loop for attempt from 1
+                      do (handler-case
+                             (return (usocket:socket-connect host port :element-type '(unsigned-byte 8)))
+                           ;; a signal (GC stop, SIGCHLD) can interrupt connect(2); usocket does not retry
+                           #+sbcl (sb-bsd-sockets:interrupted-error (e)
+                                    (when (>= attempt 5)
+                                      (error 'repl-connection-error
+                                             :message (format nil "cannot connect to ~A:~D" host port) :cause e)))
+                           (usocket:socket-error (e)
+                             (error 'repl-connection-error :message (format nil "cannot connect to ~A:~D" host port)
+                                                           :cause e))))))
     (let ((conn (apply #'make-instance class :socket socket :host host
                                              :stream (usocket:socket-stream socket) initargs)))
       (setf (wire-reader-thread conn)
@@ -240,12 +246,15 @@ not end the reader thread."
 → (values status value): :OK value, :ABORT reason, or :DEBUG DEBUGGER-STATE when
 the image entered the debugger before replying. The request then stays pending
 and its reply is collected by WIRE-AWAIT after a restart."
-  (let ((id (bt2:with-lock-held ((wire-lock conn))
-              (let ((id (incf (wire-next-id conn))))
-                (setf (gethash id (wire-pending conn)) (list :waiting))
-                id))))
+  ;; read the debug serial before sending: the image may enter the debugger
+  ;; before this thread gets to wait
+  (multiple-value-bind (id serial)
+      (bt2:with-lock-held ((wire-lock conn))
+        (let ((id (incf (wire-next-id conn))))
+          (setf (gethash id (wire-pending conn)) (list :waiting))
+          (values id (wire-debug-serial conn))))
     (wire-send conn (list :emacs-rex form (or package "COMMON-LISP-USER") thread id))
-    (wire-await conn id :timeout timeout)))
+    (wire-await conn id :timeout timeout :serial serial)))
 
 (defun wire-await (conn id &key (timeout *repl-timeout*) (serial nil))
   "Wait for the reply to request ID, or for a new debugger level."
@@ -262,8 +271,11 @@ and its reply is collected by WIRE-AWAIT after a restart."
                        (return (values (first cell) (second cell))))
                       ((/= serial (wire-debug-serial conn))
                        (let ((state (first (wire-debuggers conn))))
-                         (setf (debugger-state-request-id state) id)
-                         (return (values :debug state))))
+                         (if state
+                             (progn (setf (debugger-state-request-id state) id)
+                                    (return (values :debug state)))
+                             ;; the level opened and closed before we woke: keep waiting
+                             (setf serial (wire-debug-serial conn)))))
                       ((wire-closed conn)
                        (return (values :closed (wire-close-reason conn))))
                       ((and deadline (>= (get-internal-real-time) deadline))

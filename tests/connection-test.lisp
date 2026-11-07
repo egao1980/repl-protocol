@@ -6,7 +6,8 @@
   (let ((pending-debug nil))
     (loop
       (let* ((msg (handler-case (read-message stream)
-                    (repl-error () (return))))
+                    ;; the client closed (possibly with a reset)
+                    ((or repl-error stream-error) () (return))))
              (head (symbol-name (first msg))))
         (flet ((send (form) (write-message stream form)))
           (cond
@@ -34,6 +35,11 @@
                         (send (list :ping 1 7))
                         (let ((pong (read-message stream)))
                           (send (list :return (list :ok (repl-protocol::symbol-name-of (first pong))) id))))
+                       ((string= op "BLIP")
+                        ;; a debugger level that opens and closes before the reply
+                        (send (list :debug 2 1 (list "blip" "SIMPLE-ERROR") (list (list "ABORT" "x")) nil nil))
+                        (send (list :debug-return 2 1 nil))
+                        (send (list :return (list :ok "after") id)))
                        ((string= op "SLOW") nil)
                        (t (send (list :return (list :abort "unknown") id)))))))
             ((string= head "EMACS-INTERRUPT") nil)))))))
@@ -45,8 +51,11 @@
             (,thread (bt2:make-thread
                       (lambda ()
                         (let ((client (usocket:socket-accept ,listener)))
-                          (unwind-protect (fake-server-loop (usocket:socket-stream client))
-                            (usocket:socket-close client))))
+                          (unwind-protect
+                               (handler-case (fake-server-loop (usocket:socket-stream client))
+                                 (stream-error () nil))
+                            (handler-case (usocket:socket-close client)
+                              (stream-error () nil)))))
                       :name "fake swank"))
             (,conn (open-wire-connection 'wire-connection "127.0.0.1"
                                          (usocket:get-local-port ,listener)
@@ -137,3 +146,10 @@
                          "(sleep 1)" "(uiop:quit 0)"))
                  :timeout 60)))
       (ok (= port 4242)))))
+
+(deftest debugger-level-gone-before-wakeup
+  (with-fake-server (conn)
+    (dotimes (i 20)
+      (multiple-value-bind (status value) (wire-rex conn (list (wsym "SWANK" "BLIP")) :timeout 5)
+        (ok (member status '(:ok :debug)))
+        (when (eq status :ok) (ok (equal value "after")))))))
