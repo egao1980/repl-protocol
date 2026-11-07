@@ -36,3 +36,8 @@
 
 (define-condition repl-not-in-debugger (repl-error) ()
   (:report "The image is not in the debugger"))
+
+(define-condition repl-not-supported (repl-error)
+  ((operation :initarg :operation :reader repl-not-supported-operation))
+  (:report (lambda (c s)
+             (format s "This backend does not support ~(~A~)" (repl-not-supported-operation c)))))

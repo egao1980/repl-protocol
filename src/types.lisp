@@ -38,6 +38,8 @@
    (output :initarg :output :initform "" :reader eval-result-output)
    (id :initarg :id :initform nil :reader eval-result-id
        :documentation "Server-side handle of the values, for REPL-INSPECT-RESULT.")
+   (entry :initarg :entry :initform nil :reader eval-result-entry
+          :documentation "History entry of a channel evaluation: value I is #v<entry>:<I>.")
    (aborted :initarg :aborted :initform nil :reader eval-result-aborted-p)
    (reason :initarg :reason :initform nil :reader eval-result-reason)))
 
@@ -124,3 +126,32 @@ decides what to do (invoke a restart, inspect frames, …)."))
 (defclass repl-event ()
   ((kind :initarg :kind :reader repl-event-kind)
    (data :initarg :data :initform nil :reader repl-event-data)))
+
+(defclass repl-channel ()
+  ((connection :initarg :connection :reader repl-channel-connection)
+   (remote-id :initarg :remote-id :reader repl-channel-remote-id
+              :documentation "Our id for the channel; the image addresses its messages to it.")
+   (id :initform nil :accessor repl-channel-id :documentation "The image's id for the channel.")
+   (thread :initform nil :accessor repl-channel-thread
+           :documentation "Thread designator of the channel's REPL thread in the image.")
+   (package :initform nil :accessor repl-channel-package
+            :documentation "Package name from the channel's last prompt.")
+   (inbox :initform (make-array 8 :adjustable t :fill-pointer 0) :reader repl-channel-inbox
+          :documentation "Messages from the image, oldest first.")
+   (cursor :initform 0 :accessor repl-channel-cursor
+           :documentation "Inbox index where the next evaluation starts reading.")
+   (recovering :initform nil :accessor repl-channel-recovering
+               :documentation "True after an evaluation entered the debugger: its closing prompt is still due.")
+   (output :initform (make-string-output-stream) :accessor repl-channel-output
+           :documentation "Text from the channel's dedicated output socket, not yet collected.")
+   (output-at :initform 0 :accessor repl-channel-output-at
+              :documentation "Internal real time of the last output received.")
+   (output-socket :initform nil :accessor repl-channel-output-socket)
+   (closed :initform nil :accessor repl-channel-closed-p))
+  (:documentation "A separate REPL in the image (Slynk mrepl): its own thread, package
+and value history. Values are referenced as #v<entry>:<index> in later input."))
+
+(defmethod print-object ((c repl-channel) stream)
+  (print-unreadable-object (c stream :type t)
+    (format stream "~A~@[ ~A~]~:[~; closed~]" (repl-channel-remote-id c) (repl-channel-package c)
+            (repl-channel-closed-p c))))

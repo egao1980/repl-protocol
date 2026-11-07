@@ -6,6 +6,7 @@
 
 (defclass wire-connection (repl-connection)
   ((socket :initarg :socket :reader wire-socket)
+   (host :initarg :host :initform "127.0.0.1" :reader wire-host)
    (stream :initarg :stream :reader wire-stream)
    (rpc-package :initarg :rpc-package :reader wire-connection-rpc-package
                 :documentation "Package of the server's RPC functions, e.g. \"SWANK\".")
@@ -21,6 +22,10 @@
    (output :initform (make-string-output-stream) :accessor wire-output)
    (events :initform '() :accessor wire-events)
    (indentation :initform '() :accessor wire-indentation)
+   (channels :initform (make-hash-table) :reader wire-channels
+             :documentation "Remote id → REPL-CHANNEL.")
+   (next-channel-id :initform 0 :accessor wire-next-channel-id)
+   (event-listener :initform nil :initarg :event-listener :accessor wire-event-listener)
    (closed :initform nil :accessor wire-closed)
    (released :initform nil :accessor wire-released
              :documentation "True once the socket has been shut down and closed.")
@@ -39,7 +44,7 @@
                   (usocket:socket-error (e)
                     (error 'repl-connection-error :message (format nil "cannot connect to ~A:~D" host port)
                                                   :cause e)))))
-    (let ((conn (apply #'make-instance class :socket socket
+    (let ((conn (apply #'make-instance class :socket socket :host host
                                              :stream (usocket:socket-stream socket) initargs)))
       (setf (wire-reader-thread conn)
             (bt2:make-thread (lambda () (reader-loop conn))
@@ -74,6 +79,11 @@
   (unless (bt2:with-lock-held ((wire-lock conn))
             (shiftf (wire-released conn) t))
     (ignoring-wire-errors (usocket:socket-shutdown (wire-socket conn) :io))
+    (dolist (channel (bt2:with-lock-held ((wire-lock conn))
+                       (alexandria:hash-table-values (wire-channels conn))))
+      (setf (repl-channel-closed-p channel) t)
+      (let ((socket (repl-channel-output-socket channel)))
+        (when socket (ignoring-wire-errors (usocket:socket-shutdown socket :io)))))
     (let ((reader (wire-reader-thread conn)))
       (when (and reader (not (eq reader (bt2:current-thread))))
         (loop repeat 200
@@ -120,8 +130,39 @@
     (make-instance 'frame-info :index index :description description
                                :restartable (and (listp plist) (wire-plist-get plist "RESTARTABLE")))))
 
+(defun open-channel-output (conn channel port)
+  "The image wants a dedicated output socket for CHANNEL on PORT (Slynk mrepl):
+connect and copy its text into the channel's output buffer."
+  (bt2:make-thread
+   (lambda ()
+     (let ((socket (handler-case (usocket:socket-connect (wire-host conn) port :element-type 'character)
+                     (usocket:socket-error () nil))))
+       (when socket
+         (setf (repl-channel-output-socket channel) socket)
+         (let ((stream (usocket:socket-stream socket)))
+           ;; thread boundary: the socket is shut down when the channel closes
+           (handler-case
+               (loop for c = (read-char stream nil nil)
+                     while c
+                     do (bt2:with-lock-held ((wire-lock conn))
+                          (write-char c (repl-channel-output channel))
+                          (setf (repl-channel-output-at channel) (get-internal-real-time))
+                          (bt2:condition-broadcast (wire-cv conn))))
+             (error () nil))
+           (ignoring-wire-errors (usocket:socket-close socket))))))
+   :name (format nil "repl channel ~A output" (repl-channel-remote-id channel))))
+
+(defun notify-listener (conn kind data)
+  "Call the connection's event listener. Its errors become warnings: they must
+not end the reader thread."
+  (let ((fn (wire-event-listener conn)))
+    (when fn
+      (handler-case (funcall fn kind data)
+        (error (e) (warn "REPL event listener failed on ~S: ~A" kind e))))))
+
 (defun dispatch-event (conn form)
-  (let ((head (event-head form)))
+  (let ((head (event-head form))
+        (notice nil))
     (bt2:with-lock-held ((wire-lock conn))
       (alexandria:switch (head :test #'equal)
         ("RETURN"
@@ -137,17 +178,20 @@
                                                          (>= (debugger-state-level d) (debugger-state-level state))))
                                         (wire-debuggers conn))))
            (setf (wire-last-thread conn) (debugger-state-thread state))
-           (incf (wire-debug-serial conn))))
+           (incf (wire-debug-serial conn))
+           (setf notice (list :debug state))))
         ("DEBUG-RETURN"
          (destructuring-bind (thread level &rest more) (rest form)
            (declare (ignore more))
+           (setf notice (list :debug-return (list thread level)))
            (setf (wire-debuggers conn)
                  (remove-if (lambda (d) (and (equal (debugger-state-thread d) thread)
                                              (>= (debugger-state-level d) level)))
                             (wire-debuggers conn)))))
         ("DEBUG-ACTIVATE" nil)
         ("WRITE-STRING"
-         (write-string (second form) (wire-output conn)))
+         (write-string (second form) (wire-output conn))
+         (setf notice (list :output (second form))))
         ("PING"
          (destructuring-bind (thread tag) (rest form)
            (bt2:make-thread (lambda () (ignoring-wire-errors
@@ -163,12 +207,27 @@
                               :name "repl read-string"))))
         ("INDENTATION-UPDATE"
          (setf (wire-indentation conn)
-               (append (second form) (wire-indentation conn))))
+               (append (second form) (wire-indentation conn)))
+         (setf notice (list :indentation (second form))))
+        ("CHANNEL-SEND"
+         (destructuring-bind (remote-id message) (rest form)
+           (let ((channel (gethash remote-id (wire-channels conn))))
+             (if channel
+                 (progn
+                   (when (and (consp message) (wire-symbol= (first message) "PROMPT"))
+                     (setf (repl-channel-package channel) (second message)))
+                   (when (and (consp message) (wire-symbol= (first message) "OPEN-DEDICATED-OUTPUT-STREAM"))
+                     (open-channel-output conn channel (second message)))
+                   (vector-push-extend message (repl-channel-inbox channel))
+                   (setf notice (list :channel (list channel message))))
+                 (push (make-instance 'repl-event :kind head :data (rest form)) (wire-events conn))))))
         ("INVALID-RPC"
          (destructuring-bind (id message) (rest form)
            (setf (gethash id (wire-pending conn)) (list :abort message))))
         (t (push (make-instance 'repl-event :kind head :data (rest form)) (wire-events conn))))
-      (bt2:condition-broadcast (wire-cv conn)))))
+      (bt2:condition-broadcast (wire-cv conn)))
+    (when notice
+      (notify-listener conn (first notice) (second notice)))))
 
 ;;; Requests
 
@@ -256,6 +315,12 @@ a debugger entry returns the DEBUGGER-STATE as the value."
   (bt2:with-lock-held ((wire-lock conn))
     (prog1 (reverse (wire-events conn))
       (when clear (setf (wire-events conn) '())))))
+
+(defmethod repl-event-listener ((conn wire-connection))
+  (wire-event-listener conn))
+
+(defmethod (setf repl-event-listener) (function (conn wire-connection))
+  (setf (wire-event-listener conn) function))
 
 (defmethod repl-indentation ((conn wire-connection))
   (bt2:with-lock-held ((wire-lock conn))

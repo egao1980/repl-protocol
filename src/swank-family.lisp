@@ -210,19 +210,28 @@ output captured, keep the values for later inspection, and return
 (defmethod repl-eval-in-frame ((conn swank-family-connection) frame string &key package)
   (in-debugger conn (rpc conn :eval-in-frame string frame (or package "COMMON-LISP-USER")) :package package))
 
-(defmethod repl-invoke-restart ((conn swank-family-connection) restart &key level)
+(defun resume-debugger (conn form)
+  "Send FORM in the innermost debugger's thread (it resumes the thread: a restart
+or a stepper command), then collect what the request that entered the
+debugger returns next: a result, or a new DEBUGGER-STATE."
   (let* ((state (debugger-thread conn))
          (request (debugger-state-request-id state))
          (parser (or (and request (gethash request (connection-parsers conn))) #'identity))
          (serial (bt2:with-lock-held ((wire-lock conn)) (wire-debug-serial conn))))
-    (wire-send conn (list :emacs-rex (rpc conn :invoke-restart (or level (debugger-state-level state)) restart)
-                          "COMMON-LISP-USER" (debugger-state-thread state)
+    (wire-send conn (list :emacs-rex form "COMMON-LISP-USER" (debugger-state-thread state)
                           (bt2:with-lock-held ((wire-lock conn)) (incf (wire-next-id conn)))))
     (if request
         (multiple-value-bind (status value) (wire-await conn request :serial serial)
           (unless (eq status :debug) (remhash request (connection-parsers conn)))
           (result-from conn status value parser))
         (make-instance 'eval-result :values '() :aborted nil))))
+
+(defmethod repl-invoke-restart ((conn swank-family-connection) restart &key level)
+  (let ((state (debugger-thread conn)))
+    (resume-debugger conn (rpc conn :invoke-restart (or level (debugger-state-level state)) restart))))
+
+(defmethod repl-step ((conn swank-family-connection) frame &key (mode :into))
+  (resume-debugger conn (rpc conn (ecase mode (:into :step-into) (:next :step-next) (:out :step-out)) frame)))
 
 (defmethod repl-return-from-frame ((conn swank-family-connection) frame string)
   (in-debugger conn (rpc conn :return-from-frame frame string)))
@@ -296,3 +305,156 @@ output captured, keep the values for later inspection, and return
 
 (defmethod repl-kill-thread ((conn swank-family-connection) index)
   (wire-call conn (rpc conn :kill-thread index)))
+
+;;; Channels (Slynk mrepl)
+
+(defun supported-rpc (conn operation)
+  (handler-case (rpc-symbol conn operation)
+    (repl-protocol-error () (error 'repl-not-supported :operation operation))))
+
+(defun prompt-message-p (message)
+  (and (consp message) (wire-symbol= (first message) "PROMPT")))
+
+(defun error-prompt-p (message)
+  ;; (:prompt package nickname error-level entry-index [condition])
+  (and (prompt-message-p message) (> (length message) 5)))
+
+(defun channel-wait (channel start &key (timeout *repl-timeout*) serial)
+  "Wait for a normal prompt at or after inbox index START. → (values :prompt index),
+(values :debug state) when SERIAL is given and the channel's thread entered the
+debugger, or (values :timeout nil)."
+  (let* ((conn (repl-channel-connection channel))
+         (deadline (and timeout (+ (get-internal-real-time) (* timeout internal-time-units-per-second)))))
+    (bt2:with-lock-held ((wire-lock conn))
+      (loop
+        (let* ((inbox (repl-channel-inbox channel))
+               (index (position-if (lambda (m) (and (prompt-message-p m) (not (error-prompt-p m))))
+                                   inbox :start (min start (length inbox)))))
+          (cond (index (return (values :prompt index)))
+                ((and serial (/= serial (wire-debug-serial conn))
+                      (let ((state (first (wire-debuggers conn))))
+                        (and state (equal (debugger-state-thread state) (repl-channel-thread channel)))))
+                 (return (values :debug (first (wire-debuggers conn)))))
+                ((wire-closed conn)
+                 (error 'repl-connection-error :message (or (wire-close-reason conn) "connection closed")))
+                ((and deadline (>= (get-internal-real-time) deadline))
+                 (return (values :timeout nil)))
+                (t (bt2:condition-wait (wire-cv conn) (wire-lock conn)
+                                       :timeout (if deadline
+                                                    (max 0.01 (/ (- deadline (get-internal-real-time))
+                                                                 internal-time-units-per-second))
+                                                    1)))))))))
+
+(defun drain-channel-output (channel)
+  "Output from the dedicated socket, after it has been quiet for 50 ms (at most
+half a second): the image flushes it before the prompt, but the socket is
+read by another thread."
+  (let* ((conn (repl-channel-connection channel))
+         (quiet (floor internal-time-units-per-second 20))
+         (give-up (+ (get-internal-real-time) (floor internal-time-units-per-second 2))))
+    (bt2:with-lock-held ((wire-lock conn))
+      (loop while (and (repl-channel-output-socket channel)
+                       (< (- (get-internal-real-time) (repl-channel-output-at channel)) quiet)
+                       (< (get-internal-real-time) give-up))
+            do (bt2:condition-wait (wire-cv conn) (wire-lock conn) :timeout 0.02))
+      (get-output-stream-string (repl-channel-output channel)))))
+
+(defun channel-result (channel start end)
+  "EVAL-RESULT from the inbox messages in [START, END), plus dedicated-socket output."
+  (let ((output (make-string-output-stream)) (values '()) (entry nil) (aborted nil) (reason nil))
+    (loop for i from start below end
+          for message = (aref (repl-channel-inbox channel) i)
+          for kind = (and (consp message) (symbol-name-of (first message)))
+          do (alexandria:switch (kind :test #'equal)
+               ("WRITE-STRING" (write-string (second message) output))
+               ("WRITE-VALUES"
+                ;; (presentation entry-index copy-string): numbers are presented as
+                ;; "3 (2 bits, #x3, …)"; keep the plain number
+                (loop for (printed index copy) in (second message)
+                      for text = (if (stringp printed) printed (wire-name-string printed))
+                      do (setf entry (or entry index))
+                         (push (if (and (stringp copy)
+                                        (> (length text) (+ (length copy) 1))
+                                        (string= copy text :end2 (length copy))
+                                        (string= " (" text :start2 (length copy) :end2 (+ 2 (length copy))))
+                                   copy
+                                   text)
+                               values)))
+               ("EVALUATION-ABORTED" (setf aborted t reason (second message)))))
+    (write-string (drain-channel-output channel) output)
+    (make-instance 'eval-result :output (get-output-stream-string output) :values (nreverse values)
+                                :entry entry :aborted aborted :reason reason)))
+
+(defmethod repl-open-channel ((conn swank-family-connection) &key package)
+  (supported-rpc conn :create-mrepl)
+  (let* ((remote-id (bt2:with-lock-held ((wire-lock conn)) (incf (wire-next-channel-id conn))))
+         (channel (make-instance 'repl-channel :connection conn :remote-id remote-id)))
+    (bt2:with-lock-held ((wire-lock conn))
+      (setf (gethash remote-id (wire-channels conn)) channel))
+    (let ((value (wire-call conn (rpc conn :create-mrepl remote-id))))
+      (unless (and (consp value) (integerp (first value)))
+        (error 'repl-remote-error :reason (format nil "could not create a channel: ~A" value)))
+      (setf (repl-channel-id channel) (first value)
+            (repl-channel-thread channel) (second value)))
+    (multiple-value-bind (status index) (channel-wait channel 0 :timeout 30)
+      (when (eq status :timeout)
+        (error 'repl-timeout :seconds 30 :request :open-channel))
+      (setf (repl-channel-cursor channel) (1+ index)))
+    (drain-channel-output channel)          ; the banner
+    (when package
+      (repl-channel-eval channel (format nil "(in-package ~S)" (string package))))
+    channel))
+
+(defmethod repl-channel-eval ((channel repl-channel) string &key (timeout *repl-timeout*))
+  (when (repl-channel-closed-p channel)
+    (error 'repl-connection-error :message "channel is closed"))
+  (let ((conn (repl-channel-connection channel)))
+    ;; an evaluation that entered the debugger closes with a prompt after its restart
+    (when (repl-channel-recovering channel)
+      (multiple-value-bind (status index) (channel-wait channel (repl-channel-cursor channel) :timeout 5)
+        (when (eq status :prompt)
+          (setf (repl-channel-cursor channel) (1+ index))))
+      (setf (repl-channel-recovering channel) nil))
+    (let ((start (repl-channel-cursor channel))
+          (serial (bt2:with-lock-held ((wire-lock conn)) (wire-debug-serial conn))))
+      (wire-send conn (list :emacs-channel-send (repl-channel-id channel) (list :process string)))
+      (loop
+        (multiple-value-bind (status value) (channel-wait channel start :timeout timeout :serial serial)
+          (ecase status
+            (:prompt
+             (setf (repl-channel-cursor channel) (1+ value))
+             (return (channel-result channel start value)))
+            (:debug
+             (setf (repl-channel-recovering channel) t)
+             (return value))
+            (:timeout
+             (restart-case (error 'repl-timeout :seconds timeout :request :channel-eval)
+               (keep-waiting () :report "Keep waiting for the channel" nil)
+               (interrupt ()
+                 :report "Interrupt the channel's thread"
+                 (wire-send conn (list :emacs-interrupt (repl-channel-thread channel))))))))))))
+
+(defmethod repl-channel-inspect ((channel repl-channel) entry &optional (index 0))
+  (let* ((conn (repl-channel-connection channel))
+         ;; mrepl functions must run in the channel's own thread
+         (value (multiple-value-bind (status value)
+                    (wire-rex conn (rpc conn :inspect-entry (repl-channel-remote-id channel) entry index)
+                              :thread (repl-channel-thread channel))
+                  (ecase status
+                    ((:ok :debug) value)
+                    (:abort (error 'repl-remote-error :reason value))))))
+    (if (typep value 'debugger-state) value (parse-inspector value))))
+
+(defmethod repl-close-channel ((channel repl-channel))
+  (let ((conn (repl-channel-connection channel)))
+    (unless (repl-channel-closed-p channel)
+      (setf (repl-channel-closed-p channel) t)
+      (ignoring-wire-errors
+       (wire-send conn (list :emacs-channel-send (repl-channel-id channel) (list :teardown))))
+      (bt2:with-lock-held ((wire-lock conn))
+        (remhash (repl-channel-remote-id channel) (wire-channels conn)))
+      ;; shut down only: the output thread is blocked reading and closes it
+      (let ((socket (repl-channel-output-socket channel)))
+        (when socket
+          (ignoring-wire-errors (usocket:socket-shutdown socket :io)))))
+    t))

@@ -8,8 +8,29 @@
   "Command prefix for a fresh image; arguments after it go to SBCL.
 Roswell gives the child Quicklisp, so servers load with QL:QUICKLOAD.")
 
+(defun find-program (name)
+  "Full path of program NAME found on PATH, or NAME itself when it has a
+directory part or is not found. On Windows the .exe/.cmd/.bat/.com
+extensions are tried too: CreateProcess does not search for them."
+  (if (or (find #\/ name) (find #\\ name))
+      name
+      (let* ((windows (uiop:os-windows-p))
+             (separator (if windows #\; #\:))
+             (extensions (if (and windows (not (pathname-type name)))
+                             '("" ".exe" ".cmd" ".bat" ".com")
+                             '(""))))
+        (or (loop for dir in (uiop:split-string (or (uiop:getenv "PATH") "") :separator (list separator))
+                  when (plusp (length dir))
+                    do (loop for ext in extensions
+                             for candidate = (uiop:merge-pathnames*
+                                              (uiop:parse-native-namestring (concatenate 'string name ext))
+                                              (uiop:ensure-directory-pathname (uiop:parse-native-namestring dir)))
+                             when (uiop:file-exists-p candidate)
+                               do (return-from find-program (uiop:native-namestring candidate))))
+            name))))
+
 (defun image-command (command forms)
-  (append command
+  (append (cons (find-program (first command)) (rest command))
           (list "--noinform")
           (loop for f in forms append (list "--eval" f))))
 

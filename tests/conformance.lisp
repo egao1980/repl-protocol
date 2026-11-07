@@ -15,7 +15,9 @@
 (defun abort-debugger (conn)
   (loop for state = (repl-debugger-state conn)
         while state
-        do (repl-invoke-restart conn (or (restart-index state "ABORT") 0))))
+        do (handler-case (repl-invoke-restart conn (or (restart-index state "ABORT") 0))
+             ;; the level returned between the check and the restart
+             (repl-not-in-debugger () (return)))))
 
 (defun run-conformance (conn)
   (abort-debugger conn)
@@ -106,4 +108,54 @@
 
   (abort-debugger conn)
   (testing "timeout is a condition with restarts"
-    (ok (signals (repl-eval conn "(sleep 3)" :timeout 0.3) 'repl-timeout))))
+    (ok (signals (repl-eval conn "(sleep 3)" :timeout 0.3) 'repl-timeout)))
+
+  (abort-debugger conn)
+  (testing "event listener sees debugger entries and output"
+    (let ((seen '()))
+      (setf (repl-event-listener conn) (lambda (kind data) (declare (ignore data)) (push kind seen)))
+      (unwind-protect
+           (progn
+             (repl-eval conn "(error \"listened\")")
+             (abort-debugger conn)
+             (ok (member :debug seen))
+             (ok (member :debug-return seen)))
+        (setf (repl-event-listener conn) nil))))
+
+  (abort-debugger conn)
+  (testing "stepping"
+    (repl-eval conn "(defun conformance-step (x) (declare (optimize (debug 3) (speed 0))) (let ((y (1+ x))) (* y 2)))")
+    (let ((state (repl-eval conn "(step (conformance-step 1))")))
+      (ok (typep state 'debugger-state) "STEP enters the stepper")
+      (let ((result (loop repeat 20
+                          for r = (repl-step conn 0 :mode :out)
+                          unless (typep r 'debugger-state) return r)))
+        (ok (typep result 'eval-result) "stepping out finishes the evaluation")
+        (ok (equal (and result (eval-result-values result)) '("4"))))))
+
+  (abort-debugger conn)
+  (let ((channel (handler-case (repl-open-channel conn)
+                   (repl-not-supported () nil))))
+    (when channel
+      (testing "channels: separate REPLs with value references"
+        (unwind-protect
+             (let ((other (repl-open-channel conn :package "KEYWORD")))
+               (unwind-protect
+                    (progn
+                      (let ((r (repl-channel-eval channel "(list 1 2 3)")))
+                        (ok (equal (eval-result-values r) '("(1 2 3)")))
+                        (ok (integerp (eval-result-entry r)))
+                        (let ((r2 (repl-channel-eval channel
+                                                     (format nil "(length #v~D:0)" (eval-result-entry r)))))
+                          (ok (equal (eval-result-values r2) '("3"))))
+                        (ok (typep (repl-channel-inspect channel (eval-result-entry r)) 'inspector-view)))
+                      (ok (equal (eval-result-output (repl-channel-eval channel "(princ \"out\")")) "out"))
+                      (ok (equal (repl-channel-package other) "KEYWORD"))
+                      (ok (not (equal (repl-channel-thread channel) (repl-channel-thread other))))
+                      (let ((state (repl-channel-eval channel "(error \"in channel\")")))
+                        (ok (typep state 'debugger-state))
+                        (abort-debugger conn)
+                        (ok (equal (eval-result-values (repl-channel-eval channel "(+ 1 1)")) '("2")))))
+                 (repl-close-channel other)))
+          (repl-close-channel channel))
+        (ok (repl-channel-closed-p channel))))))

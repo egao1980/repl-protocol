@@ -107,3 +107,11 @@
     (wire-close conn)
     (ok (wire-close conn))
     (ok (wire-close conn))))
+
+(deftest find-program-on-path
+  ;; a program that exists on every CI runner's PATH resolves to a full path
+  (let ((found (repl-protocol::find-program (if (uiop:os-windows-p) "cmd" "sh"))))
+    (ok (or (find #\/ found) (find #\\ found))))
+  ;; paths and unknown names are returned unchanged
+  (ok (equal "/bin/x" (repl-protocol::find-program "/bin/x")))
+  (ok (equal "no-such-program-5a1c" (repl-protocol::find-program "no-such-program-5a1c"))))
