@@ -246,12 +246,15 @@ not end the reader thread."
 → (values status value): :OK value, :ABORT reason, or :DEBUG DEBUGGER-STATE when
 the image entered the debugger before replying. The request then stays pending
 and its reply is collected by WIRE-AWAIT after a restart."
-  (let ((id (bt2:with-lock-held ((wire-lock conn))
-              (let ((id (incf (wire-next-id conn))))
-                (setf (gethash id (wire-pending conn)) (list :waiting))
-                id))))
+  ;; read the debug serial before sending: the image may enter the debugger
+  ;; before this thread gets to wait
+  (multiple-value-bind (id serial)
+      (bt2:with-lock-held ((wire-lock conn))
+        (let ((id (incf (wire-next-id conn))))
+          (setf (gethash id (wire-pending conn)) (list :waiting))
+          (values id (wire-debug-serial conn))))
     (wire-send conn (list :emacs-rex form (or package "COMMON-LISP-USER") thread id))
-    (wire-await conn id :timeout timeout)))
+    (wire-await conn id :timeout timeout :serial serial)))
 
 (defun wire-await (conn id &key (timeout *repl-timeout*) (serial nil))
   "Wait for the reply to request ID, or for a new debugger level."
