@@ -60,6 +60,11 @@ DEBUGGER-STATE when evaluation entered the debugger."))
   (:documentation "Invoke restart index RESTART of debugger LEVEL (default innermost).
 → the result of the interrupted request: EVAL-RESULT or another DEBUGGER-STATE."))
 
+(defgeneric repl-step (connection frame &key mode)
+  (:documentation "Resume the debugger's thread stepping from FRAME. MODE is :INTO
+(default), :NEXT or :OUT. Returns like REPL-INVOKE-RESTART: the next stepper
+stop as a DEBUGGER-STATE, or the request's result."))
+
 (defgeneric repl-return-from-frame (connection frame string))
 (defgeneric repl-restart-frame (connection frame))
 
@@ -106,6 +111,28 @@ DEBUGGER-STATE when evaluation entered the debugger."))
 
 (defgeneric repl-events (connection &key clear)
   (:documentation "Unhandled wire events, oldest first, as REPL-EVENTs."))
+
+(defgeneric repl-event-listener (connection)
+  (:documentation "Function called with (KIND DATA) from the connection's reader thread
+for :OUTPUT (a string), :DEBUG (a DEBUGGER-STATE), :DEBUG-RETURN (thread level),
+:INDENTATION (alist) and :CHANNEL (a REPL-CHANNEL and its message), or NIL."))
+
+(defgeneric (setf repl-event-listener) (function connection))
+
+;;; Channels (several REPLs on one connection)
+
+(defgeneric repl-open-channel (connection &key package)
+  (:documentation "A new REPL-CHANNEL with its own thread in the image. Signals
+REPL-NOT-SUPPORTED when the backend has no channels."))
+
+(defgeneric repl-channel-eval (channel string &key timeout)
+  (:documentation "Read and evaluate STRING in CHANNEL. → EVAL-RESULT (with an ENTRY
+for #v references) or DEBUGGER-STATE."))
+
+(defgeneric repl-channel-inspect (channel entry &optional index)
+  (:documentation "Inspect value INDEX (default 0) of history ENTRY. → INSPECTOR-VIEW."))
+
+(defgeneric repl-close-channel (channel))
 
 (defgeneric repl-indentation (connection)
   (:documentation "Indentation hints sent by the image: alist of name → spec."))
