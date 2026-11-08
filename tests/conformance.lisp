@@ -31,6 +31,9 @@
   (testing "eval values, output, package"
     (ok (equal (eval-result-values (repl-eval conn "(+ 1 2)")) '("3")))
     (ok (equal (eval-result-values (repl-eval conn "(values 1 :a \"s\")")) '("1" ":A" "\"s\"")))
+    ;; every form runs, in order; the values are the last form's
+    (ok (equal (eval-result-values (repl-eval conn "(defparameter *conformance-x* 1) (incf *conformance-x*)"))
+               '("2")))
     (let ((r (repl-eval conn "(progn (princ \"hi\") 42)")))
       (ok (equal (eval-result-output r) "hi"))
       (ok (equal (eval-result-values r) '("42"))))
@@ -63,7 +66,12 @@
   (abort-debugger conn)
   (testing "nested debugger levels"
     (let* ((outer (repl-eval conn "(error \"outer\")"))
+           (value (repl-eval-in-frame conn 0 "(+ 40 2)"))
            (inner (repl-eval-in-frame conn 0 "(error \"inner\")")))
+      ;; a frame eval that returns gives its printed value (Swank's
+      ;; EVAL-STRING-IN-FRAME with NIL width opened a level instead)
+      (ok (stringp value))
+      (ok (search "42" value))
       (ok (typep inner 'debugger-state))
       (ok (search "inner" (debugger-state-condition inner)) "the frame eval itself raised")
       (ok (> (debugger-state-level inner) (debugger-state-level outer)))
