@@ -148,18 +148,27 @@
 ;;; Evaluation
 
 (defun eval-form (conn string)
-  "A server-side form: read STRING in the request package, evaluate it with
-output captured, keep the values for later inspection, and return
-(output printed-values id)."
-  (let ((store (wsym (wire-connection-rpc-package conn) "*REPL-PROTOCOL-VALUES*"))
-        (vals (wsym (wire-connection-rpc-package conn) "VALS"))
-        (out (wsym (wire-connection-rpc-package conn) "OUT"))
-        (id (incf (connection-eval-counter conn))))
+  "A server-side form: read every form of STRING in the request package and
+evaluate them in order, as a REPL would (an IN-PACKAGE applies to the forms
+after it), with output captured; keep the last form's values for later
+inspection, and return (output printed-values id)."
+  (let* ((rpc (wire-connection-rpc-package conn))
+         (store (wsym rpc "*REPL-PROTOCOL-VALUES*"))
+         (vals (wsym rpc "VALS"))
+         (out (wsym rpc "OUT"))
+         (in (wsym rpc "IN"))
+         (form (wsym rpc "FORM"))
+         (id (incf (connection-eval-counter conn))))
     (cl-form "LET*"
              (list (list out (cl-form "MAKE-STRING-OUTPUT-STREAM"))
-                   (list vals (cl-form "LET" (list (list (wsym "COMMON-LISP" "*STANDARD-OUTPUT*") out))
-                                       (cl-form "MULTIPLE-VALUE-LIST"
-                                                (cl-form "EVAL" (server-form conn "FROM-STRING" string))))))
+                   (list vals (cl-form "LET" (list (list (wsym "COMMON-LISP" "*STANDARD-OUTPUT*") out)
+                                                   (list in (cl-form "MAKE-STRING-INPUT-STREAM" string))
+                                                   (list vals nil))
+                                       (cl-form "DO" (list (list form (cl-form "READ" in nil in)
+                                                                 (cl-form "READ" in nil in)))
+                                                (list (cl-form "EQ" form in) vals)
+                                                (cl-form "SETQ" vals (cl-form "MULTIPLE-VALUE-LIST"
+                                                                              (cl-form "EVAL" form)))))))
              (cl-form "UNLESS" (cl-form "BOUNDP" (list (wsym "COMMON-LISP" "QUOTE") store))
                       (cl-form "SETF" (cl-form "SYMBOL-VALUE" (list (wsym "COMMON-LISP" "QUOTE") store))
                                (cl-form "MAKE-HASH-TABLE")))

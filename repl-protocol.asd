@@ -1,5 +1,5 @@
 (defsystem "repl-protocol"
-  :version "0.2.2"
+  :version "0.2.3"
   :description "CLOS protocol for a live Lisp image session: eval, debugger, inspector, xref, threads"
   :author "egao1980"
   :license "MIT"
