@@ -87,6 +87,18 @@ and Roswell is not on PATH, the image is this Lisp's own runtime instead."
                   (stream-error () ""))))
       (parse-integer text :junk-allowed t))))
 
+(defparameter *startup-debugger-hook-form*
+  "(setf *debugger-hook* (lambda (c h) (declare (ignore h)) (ignore-errors (format *error-output* \"~&;; repl spawn: startup failed: ~A~%\" c) (finish-output *error-output*)) (let ((quit (and (find-package \"UIOP\") (find-symbol \"QUIT\" \"UIOP\")))) (if quit (funcall quit 1) #+sbcl (sb-ext:exit :code 1 :abort t) #-sbcl (abort)))))"
+  "--eval form run before the server forms: an error while loading or starting
+the server prints it and exits the image, so SPAWN-IMAGE reports it at once
+(with the log tail) instead of the child idling in the debugger until TIMEOUT.")
+
+(defun startup-forms (forms)
+  "FORMS between the fail-fast debugger hook and a form that removes it again:
+once the server runs, its own threads handle errors (Swank/Slynk bind their
+own debugger hooks)."
+  (append (list *startup-debugger-hook-form*) forms (list "(setf *debugger-hook* nil)")))
+
 (defun spawn-image (forms-function &key (command *default-image-command*) directory env (timeout 180))
   "Launch an image. FORMS-FUNCTION gets the port-file namestring and returns the
 --eval forms (strings) that start a server writing its port there.
@@ -95,7 +107,7 @@ and Roswell is not on PATH, the image is this Lisp's own runtime instead."
          (dir (uiop:temporary-directory))
          (port-file (merge-pathnames (format nil "repl-~A.port" stamp) dir))
          (log-file (merge-pathnames (format nil "repl-~A.log" stamp) dir))
-         (cmd (image-command command (funcall forms-function (namestring port-file))))
+         (cmd (image-command command (startup-forms (funcall forms-function (namestring port-file)))))
          (process (handler-case
                       (process-protocol:launch cmd :output log-file :error :output
                                                    :directory directory :env env)
