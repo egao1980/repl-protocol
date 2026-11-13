@@ -157,7 +157,7 @@
 (deftest system-registry-form-names-found-directories
   (let ((form (repl-protocol:system-registry-form '("repl-protocol" "no-such-system-7c2e"))))
     (ok (stringp form))
-    (ok (search (uiop:native-namestring (asdf:system-source-directory "repl-protocol")) form))
+    (ok (search (prin1-to-string (uiop:native-namestring (asdf:system-source-directory "repl-protocol"))) form))
     (ok (not (search "no-such-system-7c2e" form))))
   (ok (null (repl-protocol:system-registry-form '("no-such-system-7c2e")))))
 
