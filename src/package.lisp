@@ -183,4 +183,5 @@
    ;; spawn
    #:spawn-image
    #:image-command
+   #:system-registry-form
    #:*default-image-command*))

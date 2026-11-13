@@ -153,3 +153,25 @@
       (multiple-value-bind (status value) (wire-rex conn (list (wsym "SWANK" "BLIP")) :timeout 5)
         (ok (member status '(:ok :debug)))
         (when (eq status :ok) (ok (equal value "after")))))))
+
+(deftest system-registry-form-names-found-directories
+  (let ((form (repl-protocol:system-registry-form '("repl-protocol" "no-such-system-7c2e"))))
+    (ok (stringp form))
+    (ok (search (prin1-to-string (uiop:native-namestring (asdf:system-source-directory "repl-protocol"))) form))
+    (ok (not (search "no-such-system-7c2e" form))))
+  (ok (null (repl-protocol:system-registry-form '("no-such-system-7c2e")))))
+
+#+sbcl
+(deftest child-finds-systems-through-registry-form
+  ;; a fresh image without init files finds repl-protocol only through the form
+  (let ((repl-protocol:*default-image-command* '("no-such-ros-5a1c" "run" "--"))
+        (process-protocol:*process-backend* (or process-protocol:*process-backend*
+                                                (process-backend-uiop:use-uiop-process-backend))))
+    (let ((port (repl-protocol:spawn-image
+                 (lambda (port-file)
+                   (list "(require :asdf)"
+                         (repl-protocol:system-registry-form '("repl-protocol"))
+                         (format nil "(with-open-file (o ~S :direction :output :if-exists :supersede) (write (if (asdf:find-system \"repl-protocol\" nil) 4243 1) :stream o))" port-file)
+                         "(sleep 1)" "(uiop:quit 0)"))
+                 :timeout 60)))
+      (ok (= port 4243)))))
