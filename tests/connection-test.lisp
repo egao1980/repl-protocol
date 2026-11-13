@@ -175,3 +175,22 @@
                          "(sleep 1)" "(uiop:quit 0)"))
                  :timeout 60)))
       (ok (= port 4243)))))
+
+#+sbcl
+(deftest startup-error-fails-fast
+  ;; a server form that errors makes the image exit: spawn-image reports it
+  ;; with the log tail at once, not after TIMEOUT
+  (let ((repl-protocol:*default-image-command* '("no-such-ros-5a1c" "run" "--"))
+        (process-protocol:*process-backend* (or process-protocol:*process-backend*
+                                                (process-backend-uiop:use-uiop-process-backend)))
+        (start (get-internal-real-time)))
+    (let ((e (handler-case (progn (repl-protocol:spawn-image
+                                   (lambda (port-file) (declare (ignore port-file))
+                                     (list "(error \"no swank here 7c2e\")" "(sleep 600)"))
+                                   :timeout 120)
+                                  nil)
+               (repl-protocol:repl-spawn-error (c) c))))
+      (ok e "spawn-image signals REPL-SPAWN-ERROR")
+      (ok (< (- (get-internal-real-time) start) (* 60 internal-time-units-per-second))
+          "well before the 120 s timeout")
+      (ok (search "no swank here 7c2e" (princ-to-string e)) "the report carries the error"))))
