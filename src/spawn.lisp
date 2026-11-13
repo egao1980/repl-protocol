@@ -4,9 +4,10 @@
 ;;; write its port to a file, then wait for the file. Needs a PROCESS-PROTOCOL
 ;;; backend (e.g. process-backend-uiop) to be active.
 
-(defparameter *default-image-command* '("ros" "run" "--")
+(defparameter *default-image-command* '("ros" "+Q" "run" "--")
   "Command prefix for a fresh image; arguments after it go to SBCL.
-Roswell gives the child Quicklisp, so servers load with QL:QUICKLOAD.")
++Q keeps Roswell's Quicklisp out: servers load with ASDF, from the directories
+this image's own registry finds them in (SYSTEM-REGISTRY-FORM).")
 
 (defun find-program (name)
   "Full path of program NAME found on PATH, or NAME itself when it has a
@@ -32,32 +33,46 @@ does not search for them."
 
 (defun current-lisp-command ()
   "Command that starts this Lisp again (SBCL: its runtime and core, without
-init files), and --eval forms that load Quicklisp in the child when this image
-has it. NIL when the implementation is not supported."
+init files). NIL when the implementation is not supported. The child gets no
+Quicklisp: servers load with ASDF (see SYSTEM-REGISTRY-FORM)."
   #+sbcl
-  (values (list (uiop:native-namestring sb-ext:*runtime-pathname*)
-                "--core" (uiop:native-namestring sb-ext:*core-pathname*)
-                "--noinform" "--no-sysinit" "--no-userinit")
-          (let ((ql (find-package "QL")))
-            (when ql
-              (let ((home (symbol-value (find-symbol "*QUICKLISP-HOME*" ql))))
-                ;; Roswell's Quicklisp has local-init files that need Roswell itself:
-                ;; skip them through Quicklisp's own SKIP restart
-                (list (format nil "(handler-bind ((error (lambda (c) (let ((r (find \"SKIP\" (compute-restarts c) :key (lambda (r) (string (restart-name r))) :test (function string=)))) (when r (invoke-restart r)))))) (load ~S))"
-                              (uiop:native-namestring (merge-pathnames "setup.lisp" home))))))))
+  (list (uiop:native-namestring sb-ext:*runtime-pathname*)
+        "--core" (uiop:native-namestring sb-ext:*core-pathname*)
+        "--noinform" "--no-sysinit" "--no-userinit")
   #-sbcl nil)
 
 (defun eval-arguments (forms)
   (loop for f in forms append (list "--eval" f)))
 
+(defun system-directories (names)
+  "Native namestrings of the source directories of systems NAMES as this image's
+ASDF registry finds them (e.g. a cl-repo install tree), skipping the ones it
+does not find. Only the .asd files are read: nothing is loaded."
+  (remove-duplicates
+   (loop for name in names
+         for system = (asdf:find-system name nil)
+         for dir = (and system (asdf:system-source-directory system))
+         when dir collect (uiop:native-namestring dir))
+   :test #'string=))
+
+(defun system-registry-form (names)
+  "--eval form (a string) that puts the directories where this image finds
+systems NAMES in front of the child's own ASDF source registry, so the child
+loads them with ASDF:LOAD-SYSTEM from the same cl-repo install tree. The
+child's registry (a `cl-repo run` form, CL_SOURCE_REGISTRY, the defaults) is
+kept after them. NIL when this image finds none of NAMES."
+  (let ((dirs (system-directories names)))
+    (when dirs
+      (format nil "(let ((p asdf/source-registry:*source-registry-parameter*)) (asdf:initialize-source-registry (append '(:source-registry~{ (:directory ~S)~}) (if (and (consp p) (eq (first p) :source-registry)) (rest p) '(:inherit-configuration)))))"
+              dirs))))
+
 (defun image-command (command forms)
   "Argument list for COMMAND running FORMS. When COMMAND is the default (Roswell)
 and Roswell is not on PATH, the image is this Lisp's own runtime instead."
   (multiple-value-bind (program found) (find-program (first command))
-    (multiple-value-bind (prefix setup)
-        (and (not found) (equal command *default-image-command*) (current-lisp-command))
+    (let ((prefix (and (not found) (equal command *default-image-command*) (current-lisp-command))))
       (if prefix
-          (append prefix (eval-arguments (append setup forms)))
+          (append prefix (eval-arguments forms))
           (append (cons program (rest command)) (list "--noinform") (eval-arguments forms))))))
 
 (defun file-tail (path &optional (max 4000))
