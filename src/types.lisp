@@ -73,7 +73,10 @@
    (restarts :initarg :restarts :initform '() :reader debugger-state-restarts)
    (frames :initarg :frames :initform '() :reader debugger-state-frames)
    (request-id :initarg :request-id :initform nil :accessor debugger-state-request-id
-               :documentation "Pending request that entered this debugger level, if known."))
+               :documentation "Pending request that entered this debugger level, if known.")
+   (continuations :initarg :continuations :initform :unknown :reader debugger-state-continuations
+                  :documentation "Request ids pending in the debugged thread (Swank and Slynk send
+them with :DEBUG), or :UNKNOWN when the server did not say."))
   (:documentation "The image entered the debugger. Not a condition: the caller
 decides what to do (invoke a restart, inspect frames, …)."))
 
@@ -159,3 +162,9 @@ and value history. Values are referenced as #v<entry>:<index> in later input."))
   (print-unreadable-object (c stream :type t)
     (format stream "~A~@[ ~A~]~:[~; closed~]" (repl-channel-remote-id c) (repl-channel-package c)
             (repl-channel-closed-p c))))
+
+(defun debugger-state-owns-request-p (state id)
+  "True when request ID is pending in STATE's thread, or the server did not
+send the thread's continuations (then any new level may be ID's)."
+  (let ((conts (debugger-state-continuations state)))
+    (or (eq conts :unknown) (and (member id conts) t))))
