@@ -176,7 +176,8 @@ not end the reader thread."
          (destructuring-bind (value id) (rest form)
            ;; nobody waits for an abandoned request (its caller timed out and
            ;; unwound): drop the reply instead of keeping it forever
-           (if (eq (first (gethash id (wire-pending conn))) :abandoned)
+           ;; (a request sent without waiting, as a restart is, has no entry)
+           (if (member (first (gethash id (wire-pending conn))) '(nil :abandoned))
                (remhash id (wire-pending conn))
                (setf (gethash id (wire-pending conn))
                  (if (and (consp value) (wire-symbol= (first value) "OK"))
