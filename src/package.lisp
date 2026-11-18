@@ -45,6 +45,8 @@
    #:debugger-state-restarts
    #:debugger-state-frames
    #:debugger-state-request-id
+   #:debugger-state-continuations
+   #:debugger-state-owns-request-p
    #:restart-info
    #:restart-info-index
    #:restart-info-name

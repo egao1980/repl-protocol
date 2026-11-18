@@ -119,10 +119,11 @@
   (:documentation "DEBUGGER-STATE from a (:debug thread level condition restarts frames conts) event."))
 
 (defmethod parse-debugger-event ((conn wire-connection) form)
-  (destructuring-bind (thread level condition restarts frames &rest more) (rest form)
+  (destructuring-bind (thread level condition restarts frames &optional (conts :unknown) &rest more) (rest form)
     (declare (ignore more))
     (make-instance 'debugger-state
                    :thread thread :level level
+                   :continuations (if (listp conts) (remove-if-not #'integerp conts) :unknown)
                    :condition (if (consp condition) (first condition) condition)
                    :condition-type (and (consp condition) (second condition))
                    :restarts (loop for (name description) in restarts
@@ -173,10 +174,15 @@ not end the reader thread."
       (alexandria:switch (head :test #'equal)
         ("RETURN"
          (destructuring-bind (value id) (rest form)
-           (setf (gethash id (wire-pending conn))
+           ;; nobody waits for an abandoned request (its caller timed out and
+           ;; unwound): drop the reply instead of keeping it forever
+           ;; (a request sent without waiting, as a restart is, has no entry)
+           (if (member (first (gethash id (wire-pending conn))) '(nil :abandoned))
+               (remhash id (wire-pending conn))
+               (setf (gethash id (wire-pending conn))
                  (if (and (consp value) (wire-symbol= (first value) "OK"))
                      (list :ok (second value))
-                     (list :abort (and (consp value) (second value)))))))
+                     (list :abort (and (consp value) (second value))))))))
         ("DEBUG"
          (let ((state (parse-debugger-event conn form)))
            (setf (wire-debuggers conn)
@@ -257,25 +263,45 @@ and its reply is collected by WIRE-AWAIT after a restart."
     (wire-await conn id :timeout timeout :serial serial)))
 
 (defun wire-await (conn id &key (timeout *repl-timeout*) (serial nil))
-  "Wait for the reply to request ID, or for a new debugger level."
+  "Wait for the reply to request ID, or for a new debugger level entered while
+ID is pending in the debugged thread (another request's debugger, or one in a
+thread with no request, does not end the wait). If the wait is left without a
+reply (a REPL-TIMEOUT handler unwound), the request is marked abandoned and
+its late reply is dropped; waiting on it again reclaims it."
   (let ((deadline (and timeout (+ (get-internal-real-time)
                                   (* timeout internal-time-units-per-second))))
-        (serial (or serial (bt2:with-lock-held ((wire-lock conn)) (wire-debug-serial conn)))))
+        (serial (or serial (bt2:with-lock-held ((wire-lock conn)) (wire-debug-serial conn))))
+        (finished nil))
+    (bt2:with-lock-held ((wire-lock conn))
+      (when (eq (first (gethash id (wire-pending conn))) :abandoned)
+        (setf (gethash id (wire-pending conn)) (list :waiting))))
+    (unwind-protect
+         (multiple-value-prog1 (await-loop conn id deadline serial timeout)
+           (setf finished t))
+      (unless finished
+        (bt2:with-lock-held ((wire-lock conn))
+          (when (eq (first (gethash id (wire-pending conn))) :waiting)
+            (setf (gethash id (wire-pending conn)) (list :abandoned))))))))
+
+(defun await-loop (conn id deadline serial timeout)
+  (let ((serial serial))
     (loop
       (multiple-value-bind (status value)
           (bt2:with-lock-held ((wire-lock conn))
             (loop
               (let ((cell (gethash id (wire-pending conn))))
-                (cond ((not (eq (first cell) :waiting))
+                (cond ((not (member (first cell) '(:waiting :abandoned)))
                        (remhash id (wire-pending conn))
                        (return (values (first cell) (second cell))))
                       ((/= serial (wire-debug-serial conn))
-                       (let ((state (first (wire-debuggers conn))))
-                         (if state
-                             (progn (setf (debugger-state-request-id state) id)
-                                    (return (values :debug state)))
-                             ;; the level opened and closed before we woke: keep waiting
-                             (setf serial (wire-debug-serial conn)))))
+                       (setf serial (wire-debug-serial conn))
+                       ;; innermost level first; a level that opened and closed
+                       ;; before we woke is gone: keep waiting
+                       (let ((state (find-if (lambda (d) (debugger-state-owns-request-p d id))
+                                             (wire-debuggers conn))))
+                         (when state
+                           (setf (debugger-state-request-id state) id)
+                           (return (values :debug state)))))
                       ((wire-closed conn)
                        (return (values :closed (wire-close-reason conn))))
                       ((and deadline (>= (get-internal-real-time) deadline))

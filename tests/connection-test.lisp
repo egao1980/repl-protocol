@@ -25,7 +25,7 @@
                                     (list (list "ABORT" "Return to top level")
                                           (list "USE-VALUE" "Use a value"))
                                     (list (list 0 "(FOO)" (list :restartable t)) (list 1 "(BAR)"))
-                                    nil))
+                                    (list id)))
                         (send (list :debug-activate 1 1 nil)))
                        ((string= op "RESTART")
                         (send (list :debug-return 1 1 nil))
@@ -40,6 +40,13 @@
                         (send (list :debug 2 1 (list "blip" "SIMPLE-ERROR") (list (list "ABORT" "x")) nil nil))
                         (send (list :debug-return 2 1 nil))
                         (send (list :return (list :ok "after") id)))
+                       ((string= op "FOREIGN")
+                        ;; another thread (no request of ours pending there) enters the debugger
+                        (send (list :debug 5 1 (list "other" "SIMPLE-ERROR") (list (list "ABORT" "x")) nil (list 999)))
+                        (send (list :return (list :ok "mine") id)))
+                       ((string= op "LATE")
+                        (bt2:make-thread (lambda () (sleep 0.5) (send (list :return (list :ok "late") id)))
+                                         :name "fake late reply"))
                        ((string= op "SLOW") nil)
                        (t (send (list :return (list :abort "unknown") id)))))))
             ((string= head "EMACS-INTERRUPT") nil)))))))
@@ -194,3 +201,28 @@
       (ok (< (- (get-internal-real-time) start) (* 60 internal-time-units-per-second))
           "well before the 120 s timeout")
       (ok (search "no swank here 7c2e" (princ-to-string e)) "the report carries the error"))))
+
+(deftest foreign-debugger-does-not-end-the-wait
+  (with-fake-server (conn)
+    ;; a level whose continuations do not include this request belongs to someone else
+    (ok (equal (multiple-value-list (wire-rex conn (list (wsym "T" "FOREIGN")) :timeout 5)) '(:ok "mine")))
+    (let ((other (repl-debugger-state conn)))
+      (ok (equal (debugger-state-continuations other) '(999)))
+      (ok (null (debugger-state-request-id other)))
+      (ok (not (debugger-state-owns-request-p other 1))))))
+
+(deftest abandoned-request-drops-its-reply
+  (with-fake-server (conn)
+    (ok (signals (wire-rex conn (list (wsym "T" "LATE")) :timeout 0.1) 'repl-timeout))
+    (let ((id (repl-protocol::wire-next-id conn)))
+      (ok (eq :abandoned (first (gethash id (repl-protocol::wire-pending conn)))))
+      (loop repeat 100
+            while (gethash id (repl-protocol::wire-pending conn))
+            do (sleep 0.02))
+      (ok (null (gethash id (repl-protocol::wire-pending conn)))))))
+
+(deftest abandoned-request-can-be-reclaimed
+  (with-fake-server (conn)
+    (ok (signals (wire-rex conn (list (wsym "T" "LATE")) :timeout 0.1) 'repl-timeout))
+    (ok (equal (multiple-value-list (repl-protocol::wire-await conn (repl-protocol::wire-next-id conn) :timeout 5))
+               '(:ok "late")))))
