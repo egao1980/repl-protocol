@@ -426,6 +426,27 @@ read by another thread."
       (repl-channel-eval channel (format nil "(in-package ~S)" (string package))))
     channel))
 
+(defun channel-settle (channel &key (timeout 5))
+  "Wait until the channel's thread is past the drain that follows a debugger
+abort. Slynk's ABORT sends the channel's prompt and only then drops the input
+already queued for the channel (mode :DROP), so input sent on that prompt can
+be lost. A request in the channel's own thread runs during the drain or after
+it: ask for the mode until it is no longer :DROP. A backend without the
+:CHANNEL-MODE operation skips this."
+  (let ((conn (repl-channel-connection channel)))
+    (when (handler-case (and (rpc-symbol conn :channel-mode) (rpc-symbol conn :find-channel))
+            (repl-protocol-error () nil))
+      (let ((form (list (rpc-symbol conn :channel-mode)
+                        (list (rpc-symbol conn :find-channel) (repl-channel-id channel))))
+            (deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second))))
+        (loop
+          (multiple-value-bind (status value)
+              (handler-case (wire-rex conn form :thread (repl-channel-thread channel) :timeout timeout)
+                (repl-timeout () (values :timeout nil)))
+            (when (or (not (and (eq status :ok) (wire-symbol= value "DROP")))
+                      (>= (get-internal-real-time) deadline))
+              (return))))))))
+
 (defmethod repl-channel-eval ((channel repl-channel) string &key (timeout *repl-timeout*))
   (when (repl-channel-closed-p channel)
     (error 'repl-connection-error :message "channel is closed"))
@@ -435,6 +456,7 @@ read by another thread."
       (multiple-value-bind (status index) (channel-wait channel (repl-channel-cursor channel) :timeout 5)
         (when (eq status :prompt)
           (setf (repl-channel-cursor channel) (1+ index))))
+      (channel-settle channel)
       (setf (repl-channel-recovering channel) nil))
     (let ((start (repl-channel-cursor channel))
           (serial (bt2:with-lock-held ((wire-lock conn)) (wire-debug-serial conn))))

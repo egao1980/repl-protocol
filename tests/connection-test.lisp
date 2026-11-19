@@ -3,7 +3,7 @@
 ;;; A scripted in-process server speaking the Swank framing.
 
 (defun fake-server-loop (stream)
-  (let ((pending-debug nil))
+  (let ((pending-debug nil) (drops 3))
     (loop
       (let* ((msg (handler-case (read-message stream)
                     ;; the client closed (possibly with a reset)
@@ -48,10 +48,13 @@
                         (bt2:make-thread (lambda () (sleep 0.5) (send (list :return (list :ok "late") id)))
                                          :name "fake late reply"))
                        ((string= op "SLOW") nil)
+                       ((string= op "MREPL-MODE")
+                        ;; a channel thread draining its input after an abort
+                        (send (list :return (list :ok (if (plusp drops) (progn (decf drops) :drop) :eval)) id)))
                        (t (send (list :return (list :abort "unknown") id)))))))
             ((string= head "EMACS-INTERRUPT") nil)))))))
 
-(defmacro with-fake-server ((conn) &body body)
+(defmacro with-fake-server ((conn &optional (class (quote (quote wire-connection)))) &body body)
   (let ((listener (gensym "LISTENER")) (thread (gensym "THREAD")))
     `(let* ((,listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t
                                                             :element-type '(unsigned-byte 8)))
@@ -64,7 +67,7 @@
                             (handler-case (usocket:socket-close client)
                               (stream-error () nil)))))
                       :name "fake swank"))
-            (,conn (open-wire-connection 'wire-connection "127.0.0.1"
+            (,conn (open-wire-connection ,class "127.0.0.1"
                                          (usocket:get-local-port ,listener)
                                          :rpc-package "SWANK")))
        (unwind-protect (progn ,@body)
@@ -226,3 +229,22 @@
     (ok (signals (wire-rex conn (list (wsym "T" "LATE")) :timeout 0.1) 'repl-timeout))
     (ok (equal (multiple-value-list (repl-protocol::wire-await conn (repl-protocol::wire-next-id conn) :timeout 5))
                '(:ok "late")))))
+
+(defclass mrepl-test-connection (repl-protocol::swank-family-connection) ())
+
+(defmethod rpc-symbol ((conn mrepl-test-connection) operation)
+  (ecase operation
+    (:channel-mode (wsym "T" "MREPL-MODE"))
+    (:find-channel (wsym "T" "FIND-CHANNEL"))))
+
+(deftest channel-settle-waits-out-the-drop
+  ;; Slynk drops channel input queued right after an abort: settling asks the
+  ;; channel thread for its mode until it is no longer :DROP
+  (with-fake-server (conn 'mrepl-test-connection)
+    (let ((channel (make-instance 'repl-channel :connection conn :remote-id 1)))
+      (setf (repl-channel-id channel) 1 (repl-channel-thread channel) 1)
+      (repl-protocol::channel-settle channel)
+      (ok (equal (multiple-value-list
+                  (wire-rex conn (list (wsym "T" "MREPL-MODE") (list (wsym "T" "FIND-CHANNEL") 1))))
+                 '(:ok :eval))
+          "every :DROP reply was consumed by the settle"))))
