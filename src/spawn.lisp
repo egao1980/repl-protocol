@@ -110,7 +110,10 @@ own debugger hooks)."
          (cmd (image-command command (startup-forms (funcall forms-function (namestring port-file)))))
          (process (handler-case
                       (process-protocol:launch cmd :output log-file :error :output
-                                                   :directory directory :env env)
+                                                   :directory directory :env env
+                                                   ;; so KILL-IMAGE reaches an image a
+                                                   ;; launcher (ros.exe) runs as its child
+                                                   :process-group (and (process-protocol:supports-p :process-group) t))
                     ;; SBCL's RUN-PROGRAM signals a SIMPLE-ERROR for a missing program
                     ((or process-protocol:process-error file-error simple-error) (e)
                       (error 'repl-spawn-error :message (format nil "cannot run ~{~A~^ ~}" command)
@@ -125,7 +128,7 @@ own debugger hooks)."
           (error 'repl-spawn-error :message "the image exited before starting its server"
                                    :log (file-tail log-file)))
         (when (> (get-internal-real-time) deadline)
-          (process-protocol:kill process :force t)
+          (kill-image process)
           (error 'repl-spawn-error :message (format nil "no server port after ~D s" timeout)
                                    :log (file-tail log-file)))
         (sleep 0.1)))))

@@ -369,9 +369,25 @@ a debugger entry returns the DEBUGGER-STATE as the value."
   (wire-send conn (list :emacs-interrupt (or thread t)))
   t)
 
+(defun kill-image (process)
+  "Force-kill a spawned image PROCESS and its descendants. A launcher may run
+the Lisp as a child instead of exec-ing it (Roswell's ros.exe on Windows does):
+killing only the direct child would leave that image running, holding its
+working directory. SPAWN-IMAGE launches with :PROCESS-GROUP T where the
+backend supports it; otherwise the direct child alone is killed (the
+PROCESS-GROUP-ERROR CONTINUE restart). Errors from an exited or unkillable
+process are dropped. → NIL"
+  (handler-case
+      (handler-bind ((process-protocol:process-group-error
+                       (lambda (c)
+                         (let ((restart (find-restart 'continue c)))
+                           (when restart (invoke-restart restart))))))
+        (process-protocol:kill process :force t :tree t))
+    (process-protocol:process-error () nil))
+  nil)
+
 (defmethod repl-disconnect ((conn wire-connection) &key kill)
   (wire-close conn)
   (when (and kill (connection-process conn))
-    (handler-case (process-protocol:kill (connection-process conn) :force t)
-      (process-protocol:process-error () nil)))
+    (kill-image (connection-process conn)))
   conn)

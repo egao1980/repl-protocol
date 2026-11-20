@@ -1,9 +1,9 @@
 (defsystem "repl-protocol"
-  :version "0.2.7"
+  :version "0.2.8"
   :description "CLOS protocol for a live Lisp image session: eval, debugger, inspector, xref, threads"
   :author "egao1980"
   :license "MIT"
-  :depends-on ("alexandria" "bordeaux-threads" "usocket" "babel" "process-protocol")
+  :depends-on ("alexandria" "bordeaux-threads" "usocket" "babel" (:version "process-protocol" "0.4.0"))
   :serial t
   :pathname "src"
   :components ((:file "package")
@@ -23,12 +23,13 @@
   :components ((:file "conformance")))
 
 (defsystem "repl-protocol/tests"
-  :depends-on ("repl-protocol" "rove" "flexi-streams" "process-backend-uiop")
+  :depends-on ("repl-protocol" "rove" "flexi-streams" (:version "process-backend-uiop" "0.3.1"))
   :pathname "tests"
   :serial t
   :components ((:file "package")
                (:file "wire-test")
-               (:file "connection-test"))
+               (:file "connection-test")
+               (:file "spawn-test"))
   :perform (test-op (o c)
              (unless (symbol-call :rove :run c)
                (error "tests failed for ~A" (component-name c)))))

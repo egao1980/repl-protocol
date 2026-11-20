@@ -184,6 +184,7 @@
    #:parse-location
    ;; spawn
    #:spawn-image
+   #:kill-image
    #:image-command
    #:system-registry-form
    #:*default-image-command*))
