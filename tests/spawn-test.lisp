@@ -61,3 +61,59 @@ launches a second Lisp that writes MARKER late (job-object descendants)."
              (sleep 6)
              (ok (not (probe-file marker)) "the Lisp under the launcher was killed with it")))
       (uiop:delete-file-if-exists marker))))
+
+;;; PROJECT-IMAGE-COMMAND: an image spawned for a cl-repo project runs under
+;;; `cl-repo run --`, so its registry has the project and the systems cl-repo
+;;; installed for it. Without that, (asdf:load-system "<project>") entered
+;;; the debugger with MISSING-COMPONENT (cl-stack-code's spawned image on
+;;; cl-stack-sample).
+
+(defun %scratch-directory ()
+  (let ((dir (uiop:ensure-directory-pathname
+              (merge-pathnames (format nil "repl-project-~36R" (random (expt 36 8) (make-random-state t)))
+                               (uiop:temporary-directory)))))
+    (ensure-directories-exist dir)
+    dir))
+
+(deftest project-image-command-runs-through-cl-repo
+  (let ((project (%scratch-directory))
+        (plain (%scratch-directory))
+        (cl-repo "/opt/cl-repo/bin/cl-repo")
+        (repl-protocol:*default-image-command* '("sh" "run" "--")))
+    (unwind-protect
+         (progn
+           (with-open-file (o (merge-pathnames "demo.asd" project) :direction :output)
+             (write-string "(defsystem \"demo\")" o))
+           (ok (cl-repo-project-p project))
+           (ok (not (cl-repo-project-p plain)) "no .asd: not a project")
+           (ok (not (cl-repo-project-p nil)))
+           (ok (equal (list cl-repo "run" "--" "sh" "run" "--")
+                      (project-image-command project :cl-repo cl-repo))
+               "a project: cl-repo run -- <command>")
+           (ok (equal (list cl-repo "run" "--" "my-lisp" "-q")
+                      (project-image-command project :cl-repo cl-repo :command '("my-lisp" "-q")))
+               "an explicit command is wrapped as given")
+           (ok (equal '("sh" "run" "--") (project-image-command plain :cl-repo cl-repo))
+               "not a project: the command unchanged")
+           (ok (equal '("sh" "run" "--") (project-image-command project :cl-repo nil))
+               "no cl-repo: the command unchanged")
+           (ok (equal '("sh" "run" "--") (project-image-command project :cl-repo "C:/bin/cl-repo.cmd"))
+               "a .cmd cl-repo is not used"))
+      (uiop:delete-directory-tree project :validate t :if-does-not-exist :ignore)
+      (uiop:delete-directory-tree plain :validate t :if-does-not-exist :ignore))))
+
+#+sbcl
+(deftest project-image-command-without-ros-wraps-this-lisp
+  (let ((project (%scratch-directory))
+        (repl-protocol:*default-image-command* '("no-such-ros-5a1c" "run" "--")))
+    (unwind-protect
+         (progn
+           (with-open-file (o (merge-pathnames "demo.asd" project) :direction :output)
+             (write-string "(defsystem \"demo\")" o))
+           (let ((cmd (project-image-command project :cl-repo "/x/cl-repo")))
+             (ok (equal '("/x/cl-repo" "run" "--") (subseq cmd 0 3)))
+             (ok (equal (fourth cmd) (uiop:native-namestring sb-ext:*runtime-pathname*)))
+             (ok (equal (last (repl-protocol::image-command cmd '("(+ 1 2)")) 2) '("--eval" "(+ 1 2)")))
+             (ok (= 1 (count "--noinform" (repl-protocol::image-command cmd '("(+ 1 2)")) :test #'equal))
+                 "one --noinform: a second one after the toplevel options is fatal")))
+      (uiop:delete-directory-tree project :validate t :if-does-not-exist :ignore))))
