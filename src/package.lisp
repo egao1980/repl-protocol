@@ -187,4 +187,7 @@
    #:kill-image
    #:image-command
    #:system-registry-form
+   #:project-image-command
+   #:cl-repo-project-p
+   #:*cl-repo-program*
    #:*default-image-command*))

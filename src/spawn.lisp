@@ -73,7 +73,49 @@ and Roswell is not on PATH, the image is this Lisp's own runtime instead."
     (let ((prefix (and (not found) (equal command *default-image-command*) (current-lisp-command))))
       (if prefix
           (append prefix (eval-arguments forms))
-          (append (cons program (rest command)) (list "--noinform") (eval-arguments forms))))))
+          (append (cons program (rest command))
+                  ;; once given (a `cl-repo run -- <this Lisp>` prefix), a
+                  ;; second --noinform after the toplevel options is fatal
+                  (unless (member "--noinform" command :test #'equal) (list "--noinform"))
+                  (eval-arguments forms))))))
+
+(defparameter *cl-repo-program* "cl-repo"
+  "The cl-repo CLI that PROJECT-IMAGE-COMMAND runs an image through.")
+
+(defun cl-repo-project-p (directory)
+  "True when DIRECTORY holds an .asd file at its top: a project `cl-repo run`
+can start an image for."
+  (and directory
+       (uiop:directory-exists-p directory)
+       (uiop:directory-files (uiop:ensure-directory-pathname directory) "*.asd")
+       t))
+
+(defun project-image-command (directory &key (command *default-image-command*)
+                                             (cl-repo (multiple-value-bind (path found)
+                                                          (find-program *cl-repo-program*)
+                                                        (and found path))))
+  "The command a spawned image for project DIRECTORY runs. When DIRECTORY is a
+cl-repo project (CL-REPO-PROJECT-P) and CL-REPO (the CLI's path, found on PATH
+by default) is given, COMMAND runs as `cl-repo run -- COMMAND`: cl-repo syncs
+the project and starts the image with its source registry (the checkout and
+the systems `cl-repo sync` installed) and cl-repo's fasl root, as `cl-repo
+test` sees them. Without it the child's registry has neither the project nor
+its OCI dependencies, and (asdf:load-system \"<project>\") enters the
+debugger with MISSING-COMPONENT. When COMMAND is the default and Roswell is
+not on PATH, the inner command is this Lisp's own runtime (IMAGE-COMMAND's
+fallback). A cl-repo found as a .cmd/.bat script is not used (cmd.exe would
+re-parse the --eval forms); neither is one when DIRECTORY is not a project.
+Otherwise → COMMAND."
+  (if (and cl-repo
+           (not (member (pathname-type (uiop:parse-native-namestring cl-repo))
+                        '("cmd" "bat") :test #'equalp))
+           (cl-repo-project-p directory))
+      (let ((inner (or (and (equal command *default-image-command*)
+                            (not (nth-value 1 (find-program (first command))))
+                            (current-lisp-command))
+                       command)))
+        (append (list cl-repo "run" "--") inner))
+      command))
 
 (defun file-tail (path &optional (max 4000))
   (when (and path (probe-file path))
